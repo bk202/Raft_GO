@@ -1,0 +1,26 @@
+- lastApplied: the index of the command that was last executed
+- AppendEntries RPC also performs consistency check
+- One AppendEntries RPC for each term to find the term that is conflicting
+- committed index: An entry is considered commited if majority of the servers holds this entry in its log
+
+- The tester requires that the leader send heartbeat RPCs no more than ten times per second.
+
+- implement timer with (goroutine + select + channel), goroutine either receives heartbeat and remain as follower or sleep through election timeout and convert to candidate
+
+- How often should leader broadcast heartbeat message?
+- 100 ms was too long for peers with short sleeping duration
+- 50 ms is a safer gap
+
+- use mutex in appendentries and requestvote to prevent race conditions
+
+- labrpc package simulates a lossy network environment
+- network is lossy, hence it is entirely possible for heartbeat, messages to get lost
+
+- heartbeat channel: used for receiving heartbeats
+- leader channel: used for notifying a peer of becoming a leader
+
+- Don't forget to reset peer state whenever state change happens
+
+- handling leader rejoin: rejoined leader should realize a stale self upon receiving heartbeat replies and convert to follower
+
+- The RPC call function is a blocking function, it waits for the RPC to complete
