@@ -24,3 +24,81 @@
 - handling leader rejoin: rejoined leader should realize a stale self upon receiving heartbeat replies and convert to follower
 
 - The RPC call function is a blocking function, it waits for the RPC to complete
+
+- Commit entries one by one vs. Commit entries by batch
+	* Notify peers of an entry commit via heartbeat routine
+	* Leader realizes an entry is committed via heartbeat routine's reply
+
+- If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N.
+
+- There are too many ways of designing a raft system, even though they are all capable of representing the central idea of raft
+
+- Remember to kill goroutines via raft's builtin Killed() method!
+
+- Use lock to prevent sending multiple logs at once
+
+- Remember to update INDEX value inside Start() function, since log index might change under concurrent environment
+
+- Channels: if a thread waits on a channel and two other threads pushed to the same channel, the main thread will be unblocked twice if it waits on the channel twice
+
+- Leader rejoin test: 
+	Leader 1 commit -> leader 1 disconnect -> leader 1 commit -> leader 2 elect -> leader 2 commit-> leader 2 disconnect -> leader 3 election failure -> leader 1 rejoin -> leader 1 commit -> leader 2 rejoin -> overwrite leader 2 entries
+
+go test -run 2A
+
+
+
+
+L 0 | 0 1 1
+  1 | 0 1
+  2 | 0 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
