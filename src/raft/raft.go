@@ -299,27 +299,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
+	reply.NextIndex = len(rf.logEntries) - 1
+
+	// Ensure leader term number is correct
+	if (args.Term < rf.currentTerm) {
+		reply.Success = false 
+	} else {
+		rf.currentTerm = args.Term
+	}
 
 	// Omit heartbeat messages
-	if (len(args.Entries) != 0){
-		if (verbosity >= 2){
-			fmt.Printf("Peer %d received append entries, No. entries: %d\n", rf.me, len(args.Entries))
-		}
+	if (reply.Success) && (len(args.Entries) != 0){
 		// Request fails if peer's log is inconsistent with leader and request
 		// for additional entries
 		if (args.PrevLogIndex >= len(rf.logEntries)){
-			if (verbosity >= 2){
+
+			if (verbosity >= 1){
 				fmt.Printf("Peer %d, append entries failed, PrevLogIndex: %d\n", rf.me, args.PrevLogIndex)
 			}
 
 			reply.Success = false
+
 		} else {
 			/*
 	 		Reply false if log doesn’t contain an entry at prevLogIndex
 	 		whose term matches prevLogTerm
 			*/
-			if (rf.logEntries[args.PrevLogIndex].Term != args.PrevLogTerm){
+			if (rf.logEntries[args.PrevLogIndex].Term < args.PrevLogTerm){
+
 				reply.Success = false
+				reply.NextIndex = rf.commitIndex
+
 			} else {
 				for i:=0; i<len(args.Entries); i++{
 					index := args.PrevLogIndex + i + 1
@@ -329,11 +339,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					} else {
 						rf.logEntries = append(rf.logEntries, args.Entries[i])
 					}
+
+					if (verbosity >= 1) {
+						fmt.Printf("Peer %d, log[%d]=%d[%d]\n", rf.me, index, rf.logEntries[index].Entry, rf.logEntries[index].Term)
+					}
 				}
+
+				reply.NextIndex = len(rf.logEntries) - 1
 			}
 		}
 
-		if (verbosity >= 2){
+		if (verbosity >= 1){
 			fmt.Printf("Peer %d, logs: ", rf.me)
 			for i:=0; i<len(rf.logEntries); i++{
 				fmt.Printf("%d ", rf.logEntries[i].Entry)
@@ -341,22 +357,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			fmt.Printf(", [%d]\n", args.Entries[len(args.Entries) - 1].Entry)
 		}
 
-		/*
-	 		Reply false if log doesn’t contain an entry at prevLogIndex
-	 		whose term matches prevLogTerm
-		*/
-		// if (rf.logEntries[args.PrevLogIndex].Term != args.PrevLogTerm){
-		// 	reply.Success = false
-		// }
+		if (verbosity >= 2){
+			fmt.Printf("Peer %d received logs: %d\n", rf.me, len(args.Entries))
+		}
 
-	}
-
-	if (reply.Success){
-		// Ensure leader term number is correct
-		if (args.Term < rf.currentTerm){
+	} else if (reply.Success) {
+		// Check for log consistency from heartbeat messages
+		if (args.PrevLogIndex >= len(rf.logEntries)){
 			reply.Success = false
-		} else if (args.Term > rf.currentTerm){ 
-			rf.currentTerm = args.Term
+			reply.NextIndex = rf.commitIndex
+		}
+		if (args.PrevLogIndex < len(rf.logEntries)) &&
+			(rf.logEntries[args.PrevLogIndex].Term < args.PrevLogTerm){
+			reply.Success = false
+		}
+
+		if (verbosity >= 1) && (!reply.Success){
+			fmt.Printf("Peer %d heartbeat commit entries failure, index: %d\n", rf.me, args.PrevLogIndex)
 		}
 	}
 
@@ -378,8 +395,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// }
 
 				for i:=rf.commitIndex+1; i<=newIndex; i++{
-					if (verbosity >= 2){
-						fmt.Printf("Peer: %d, sending commit message, index: %d[%d]\n", rf.me, i, rf.logEntries[i].Entry)
+					if (verbosity >= 1){
+						fmt.Printf("Peer: %d, sending commit message, index: %d[%d], term:%d\n", rf.me, i, rf.logEntries[i].Entry, rf.logEntries[i].Term)
 					}
 					msg := ApplyMsg{
 							CommandValid: true,
@@ -394,7 +411,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	reply.NextIndex = len(rf.logEntries) - 1
+	// reply.NextIndex = len(rf.logEntries) - 1
 	reply.MatchIndex = rf.commitIndex
 
 	rf.mu.Unlock()
@@ -409,11 +426,33 @@ type ApplyMsg struct {
 */
 
 func (rf *Raft) SendAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply, server int){
+	// In case leader's status was changed before entering this call
+	if (rf.state != STATE_LEADER) { return }
 
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	// ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	// if !ok { return }
 
-	if !ok{
-		return
+	waitCh := make(chan interface{})
+
+	// Send append entries to peer, if peer doesn't respond within 5o ms, retry rpc
+	RetryLoop:
+	for {
+		go func(waitChannel chan interface{}, args *AppendEntriesArgs, reply *AppendEntriesReply, server int){
+			ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
+			// Notify main routine of success
+			if ok { waitChannel <- struct{}{} }
+
+		}(waitCh, args, reply, server)
+
+		select {
+		// Wait for reply
+		case <- waitCh:
+			break RetryLoop
+		// Try again in 50 milliseconds
+		case <- time.After(time.Duration(50) * time.Millisecond):
+			continue
+		}
 	}
 
 	if (reply.Success){
@@ -430,14 +469,15 @@ func (rf *Raft) SendAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesR
 
 	} else if (reply.Term <= rf.currentTerm){
 		// Resend messages upon failure
-		start := reply.NextIndex
+		// start := reply.NextIndex
+		start := Min(len(rf.logEntries)-1, reply.NextIndex)
 
 		// Use lock here since we don't want the log entries
 		// to change while resending
 		rf.mu.Lock()
 
-		if (verbosity >= 2){
-			fmt.Printf("Leader: %d, resending entries at index: %d to peer %d\n", rf.me, start, server)
+		if (verbosity >= 1){
+			fmt.Printf("Leader: %d[%d], resending entries at index: %d to peer %d, peer term:%d\n", rf.me, rf.currentTerm, start, server, reply.Term)
 		}
 
 		reArgs := AppendEntriesArgs{}
@@ -453,6 +493,10 @@ func (rf *Raft) SendAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesR
 		// what if start >= len(rf.logEntries)?
 		for i:=start+1; i<len(rf.logEntries); i++{
 			reArgs.Entries = append(reArgs.Entries, rf.logEntries[i])
+			
+			if (verbosity >= 2){
+				fmt.Printf("Leader %d, log[%d]:%d[%d]\n", rf.me, i, rf.logEntries[i].Entry, rf.logEntries[i].Term)
+			}
 		}
 
 		rf.mu.Unlock()
@@ -460,17 +504,6 @@ func (rf *Raft) SendAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesR
 		go rf.SendAppendEntries(&reArgs, &reReply, server)
 	}
 }
-
-/*
-type AppendEntriesArgs struct{
-	Term int			// Leader's term number
-	LeaderID int		// Leader's peer ID
-	PrevLogIndex int	// Index of new log's first entry
-	PrevLogTerm int		// Term no. of PrevLogIndex entry
-	Entries []*LogEntry // New entries coming from leader (empty for heartbeat messages)
-	LeaderCommit int	// Leader's commit index
-}
-*/
 
 func (rf *Raft) BroadCastAppendEntries(args *AppendEntriesArgs){
 	for i:=0; i<len(rf.peers); i++{
@@ -518,7 +551,7 @@ func (rf *Raft) SendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if reply.VoteGranted{
 			rf.votesReceived += 1
 
-			if (verbosity >= 2){
+			if (verbosity >= 1){
 				fmt.Printf("Peer %d received vote from %d, votesReceived: %d\n", rf.me, server, rf.votesReceived)
 			}
 		}
@@ -537,7 +570,7 @@ func (rf *Raft) SendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) BroadCastRequestVote() {
 	requestVotesArgs := RequestVoteArgs{
-		Term: rf.currentTerm + 1,
+		Term: rf.currentTerm,
 		CandidateID: rf.me,
 		LastLogIndex: len(rf.logEntries) - 1,
 		LastLogTerm: rf.logEntries[len(rf.logEntries) - 1].Term,
@@ -600,12 +633,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		appendEntryArgs.Entries = append(appendEntryArgs.Entries,
 										rf.logEntries[len(rf.logEntries) - 1])
 
-		if (verbosity >= 2){
+		if (verbosity >= 1){
 			fmt.Printf("Leader: %d, logs: ", rf.me)
 			for i:=0; i<len(rf.logEntries); i++{
 				fmt.Printf("%d ", rf.logEntries[i].Entry)
 			}
 			fmt.Printf("\n")
+			// fmt.Printf("Leader %d, num logs: %v\n", rf.me, len(rf.logEntries))
 		}
 
 		rf.BroadCastAppendEntries(&appendEntryArgs)
@@ -633,7 +667,6 @@ func (rf *Raft) HeartBeatRoutine(){
 		if (rf.dead == 1){ return }
 		// Exit heartbeat routine if peer is no longer leader
 		if (rf.state != STATE_LEADER) { return }
-		// fmt.Printf("Peer %d broadcasting heartbeat...\n", rf.me)
 
 		heartbeatArgs := AppendEntriesArgs{}
 		heartbeatArgs.Term = rf.currentTerm
@@ -657,17 +690,7 @@ func (rf *Raft) HeartBeatRoutine(){
 				heartbeatReply := AppendEntriesReply{}
 				rf.peers[server].Call("Raft.AppendEntries", &heartbeatArgs, &heartbeatReply)
 
-				// if (!heartbeatReply.Success) && (heartbeatReply.Term > rf.currentTerm){
-				// 	// Conver to follower is peer's term is greater than self's term
-				// 	rf.state = STATE_FOLLOWER 
-
-				// 	if (verbosity >= 1){
-				// 		fmt.Printf("Leader %d converting back to follower\n", rf.me)
-				// 	}
-				// }
-
 				if (heartbeatReply.Success){
-					// rf.heartbeatCh <- struct{}{}
 					rf.followerCh <- struct{}{}
 
 					rf.nextIndex[server] = heartbeatReply.NextIndex
@@ -677,15 +700,23 @@ func (rf *Raft) HeartBeatRoutine(){
 					rf.mu.Lock()
 
 					rf.state = STATE_FOLLOWER
-					rf.currentTerm = heartbeatReply.Term
 					rf.votedFor = -1
 					rf.votesReceived = 0
+
+					// Empty leader channel
+					for len(rf.leaderCh) > 0 {
+						<- rf.leaderCh
+					}
 
 					rf.mu.Unlock()
 
 					if (verbosity >= 1){
-						fmt.Printf("Leader %d converted back to follower from stale term\n", rf.me)
+						fmt.Printf("Leader %d converted back to follower from stale term, peer: %d\n", rf.me, server)
 					}
+				} else {
+					// Stale peer log detected, update peer's log
+					reply := AppendEntriesReply{}
+					go rf.SendAppendEntries(&heartbeatArgs, &reply, server)
 				}
 
 				if (verbosity >= 2){
@@ -796,8 +827,20 @@ func (rf *Raft) StartPeer() () {
 				rf.currentTerm += 1
 
 				if (verbosity >= 1){
+					fmt.Printf("***********************************************\n")
 					fmt.Printf("Peer %d converted to leader, term:%d\n", rf.me, rf.currentTerm)
+					fmt.Printf("***********************************************\n")
 				}
+
+				// Launch go routine to clean up leader channel after
+				// some time to receive all votes
+				go func(){
+					time.Sleep(time.Duration(rf.electionTimeout) * time.Millisecond)
+
+					for len(rf.leaderCh) > 0{
+						<- rf.leaderCh
+					}
+				}()
 
 				// start heartbeat routine
 				go rf.HeartBeatRoutine()
@@ -912,8 +955,8 @@ func (rf *Raft) Kill() {
 			logs = append(logs, rf.logEntries[i].Entry)
 		}
 
-		// fmt.Printf("Peer %d killed, logs: %v\n", rf.me, logs)
-		fmt.Printf("Peer %d killed, num logs: %v\n", rf.me, len(logs))
+		fmt.Printf("Peer %d killed, logs: %v\n", rf.me, logs)
+		// fmt.Printf("Peer %d killed, num logs: %v\n", rf.me, len(logs))
 	}
 }
 
@@ -980,7 +1023,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = STATE_FOLLOWER
 
 	rf.heartbeatCh = make(chan interface{})
-	rf.leaderCh = make(chan interface{})
+	rf.leaderCh = make(chan interface{}, 100)
 	rf.followerCh = make(chan interface{})
 
 	rf.nextIndex = make([]int, len(rf.peers))

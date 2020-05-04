@@ -46,14 +46,13 @@
 
 go test -run 2A
 
+- On log append failures, request for additional logs from leader starting from peer's last commit index
 
+- It is guaranteed that if two logs at the same index has same term number, their entry will be the same
 
+- cfg.one retry causes duplicated entries, is this something we desire of? (No)
 
-L 0 | 0 1 1
-  1 | 0 1
-  2 | 0 1
-
-
+- heartbeat routine should be responsible for maintaining log consistency
 
 
 
